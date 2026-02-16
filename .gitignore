@@ -1,0 +1,7 @@
+# folder
+.venv
+__pycache__
+
+# file
+*.env
+*.ipynb
