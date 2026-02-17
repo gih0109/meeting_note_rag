@@ -1,3 +1,4 @@
+import re
 import math
 from langgraph.graph import StateGraph, END
 from langchain_core.runnables import Runnable, RunnableConfig
@@ -6,11 +7,26 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, TypedDict
 
 
+_TS_RE = re.compile(r"^\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*$")
+
+@dataclass
+class Speech:
+    idx: int
+    start_timestamp: str
+    end_timestamp: str
+    text: str
+    speaker: Optional[str]
+
+
 @dataclass
 class Unit:
     """텍스트 조각 단위"""
     idx: int
     text: str
+    start_timestamp: str
+    end_timestamp: str
+    speech_start_idx: int
+    speech_end_idx: int
 
 
 @dataclass
@@ -18,17 +34,44 @@ class Segment:
     """주제 구분 단락"""
     seg_idx: int
     text: str
-    unit_start: int
-    unit_end: int
+    unit_start_idx: int
+    unit_end_idx: int
+    start_timestamp: str
+    end_timestamp: str
     summary: Optional[str] = None
 
 
+@dataclass
+class SegmentSummaryOutput:
+    """
+    단락별 요약 최종 출력
+    """
+    segment_index: int
+    start_timestamp: Any
+    end_timestamp: Any
+    title: str
+    bullets: List[str]
+
+
 class SegmentState(TypedDict, total=False):
+    """
+    segment graph 용 State
+    """
     meeting_text: str # 전체 텍스트
+    speech_list: List[Speech] # 대화 리스트
     units: List[Unit] # 텍스트 조각 리스트
     unit_embeddings: List[List[float]]
     segments: List[Segment]
-    segment_summaries: List[str]
+    segment_summaries: List[SegmentSummaryOutput]
+
+
+def _ts_to_seconds(ts: str) -> float:
+    parts = [int(x) for x in ts.split(":")]
+    if len(parts) == 2:  # mm:ss
+        mm, ss = parts
+        return mm * 60 + ss
+    hh, mm, ss = parts  # hh:mm:ss
+    return hh * 3600 + mm * 60 + ss
 
 
 def _l2_normalize(vector: List[float]) -> List[float]:
@@ -65,10 +108,72 @@ def _avg_vectors(vectors: List[List[float]]) -> List[float]:
     return _l2_normalize([x / n for x in acc]) # L2 정규화
 
 
+def parse_speech_from_meeting_text(meeting_text: str) -> List[Speech]:
+    """
+    테스트용 파싱 함수
+    """
+    lines = meeting_text.replace("\r\n", "\n").split("\n")
+
+    start_ts_list = []
+    text_list = []
+
+    cur_timestamp = None
+    temp_text_list = []
+
+    def _flush():
+        """
+        현재 모아둔 speech 를 하나로 만들어 list 에 넣는 내부함수
+        """
+        nonlocal cur_timestamp, temp_text_list
+
+        if cur_timestamp is not None:
+            text = "\n".join(t.strip() for t in temp_text_list if t.strip()).strip()
+            if text:
+                start_ts_list.append(cur_timestamp)
+                text_list.append(text)
+        cur_timestamp, temp_text_list = None, []
+
+    for line in lines:
+        m = _TS_RE.match(line)
+        if m:
+            _flush()
+            cur_timestamp = m.group(1)
+            continue
+
+        if cur_timestamp is not None and line.strip():
+            temp_text_list.append(line)
+
+    _flush()
+
+    speech_list = []
+    for i, (start_ts, text) in enumerate(zip(start_ts_list, text_list)):
+        end_ts = start_ts_list[i+1] if i+1 < len(start_ts_list) else start_ts
+        speech_list.append(
+            Speech(
+                idx=i,
+                start_timestamp=start_ts,
+                end_timestamp=end_ts,
+                text=text,
+                speaker=None,
+            )
+        )
+
+    return speech_list
+
+
 ### langgraph node
 class TopicSegmentNodes:
     """
-    
+    각 단락의 요약을 만드는 sub workflow node 를 모아놓은 class
+    Args:
+        - embedding_model (HuggingFaceEmbeddings): embedding model instance
+        - segment_summarize_chain (Runnable): segment chain
+        - llm_max_worker (int): llm api invoke 시 병렬로 작업할 batch 수
+        - unit_max_chars (int): 각 단락 기본 단위 unit의 글자 수 
+        - unit_overlap_speech_num (int): 각 단락 unit 당 겹치는 대화 수
+        - similarity_threshold (float): 유닛을 기존 세그먼트에 추가할지 결정하는 코사인 유사도 임계값. (0 ~ 1) default=0.7
+        - max_units_per_segment (int): 기존 세그먼트가 가질 수 있는 유닛의 최대값. default=20 
+        - postprocess_min_chars (int): 해당 값 미만의 unit 은 병합
     """
     def __init__(
         self,
@@ -76,7 +181,8 @@ class TopicSegmentNodes:
         segment_summarize_chain: Any,
         llm_max_worker: int = 1,
         unit_max_chars: int = 500,
-        unit_overlap_chars: int = 80,
+        # unit_overlap_chars: int = 80,
+        unit_overlap_speech_num: int = 2,
         similarity_threshold: float = 0.7,
         max_units_per_segment: int = 20,
         postprocess_min_chars: int = 300,
@@ -87,50 +193,106 @@ class TopicSegmentNodes:
 
         # 각 노드 설정값
         self.max_chars = unit_max_chars
-        self.overlap_chars = unit_overlap_chars
+        # self.overlap_chars = unit_overlap_chars
+        self.overlap_speech_num = unit_overlap_speech_num
         self.similarity_threshold = similarity_threshold
         self.max_units_per_segment = max_units_per_segment
         self.min_chars = postprocess_min_chars
         
 
-    def meeting_text_to_dict(self, state: SegmentState) -> Dict[str, Any]:
-        """텍스트 정규화 노드"""
-        text = state["meeting_text"]
-        text = text.replace("\r\n", "\n").strip()
-        return {"meeting_text": text}
+    # def meeting_text_to_dict(self, state: SegmentState) -> Dict[str, Any]:
+    #     """텍스트 정규화 노드"""
+    #     text = state["meeting_text"]
+    #     text = text.replace("\r\n", "\n").strip()
+    #     return {"meeting_text": text}
+
+
+    # def make_units(self, state: SegmentState) -> Dict[str, Any]:
+    #     """텍스트를 유닛으로 분할하는 노드"""
+    #     text = state["meeting_text"]
+    #     chunks = []
+
+    #     i = 0
+    #     while i < len(text):
+    #         j = min(i + self.max_chars, len(text))
+    #         chunk = text[i:j].strip()
+
+    #         if chunk:
+    #             chunks.append(chunk)
+
+    #         i = j - self.overlap_chars
+    #         if i < 0:
+    #             i = 0
+    #         if j >= len(text):
+    #             break
+
+    #     units = [Unit(idx=k, text=t) for k, t in enumerate(chunks)]
+    #     return {"units": units}
 
 
     def make_units(self, state: SegmentState) -> Dict[str, Any]:
-        """텍스트를 유닛으로 분할하는 노드"""
-        text = state["meeting_text"]
-        chunks = []
+        """
+        speech_list 기반으로 Unit 생성
+        """
+        speech_list = state["speech_list"]
+        if not speech_list:
+            return {"units": []}
+        
+        units = []
+        unit_idx = 0
+        i = 0 # idx1
+        while i < len(speech_list):
+            # 초기화
+            cur_len = 0
+            j = i # idx2
+            line_list = []
 
-        i = 0
-        while i < len(text):
-            j = min(i + self.max_chars, len(text))
-            chunk = text[i:j].strip()
+            start_ts = speech_list[i].start_timestamp
+            end_ts = speech_list[i].end_timestamp
 
-            if chunk:
-                chunks.append(chunk)
+            # unit 을 만들기 위해 max_chars 만큼 합치기 
+            while j < len(speech_list):
+                speech = speech_list[j]
+                line = speech.text.strip()
+                len_line = len(line) + (1 if line else 0)
 
-            i = j - self.overlap_chars
-            if i < 0:
-                i = 0
-            if j >= len(text):
+                if line_list and cur_len + len_line > self.max_chars:
+                    break
+
+                line_list.append(line)
+                cur_len += len_line
+                end_ts = speech.end_timestamp
+                j += 1
+
+            text = "\n".join(line_list).strip()
+            if text:
+                units.append(
+                    Unit(
+                        idx=unit_idx,
+                        text=text,
+                        start_timestamp=start_ts,
+                        end_timestamp=end_ts,
+                        speech_start_idx=i,
+                        speech_end_idx=j-1
+                    )
+                )
+                unit_idx += 1
+            
+            # while 탈출
+            if j >= len(speech_list):
                 break
+            # overlap
+            next_i = j - self.overlap_speech_num
+            if next_i <= i:
+                next_i = i + 1
+            i = next_i
 
-        units = [Unit(idx=k, text=t) for k, t in enumerate(chunks)]
         return {"units": units}
 
 
     def embedding_units(self, state: SegmentState) -> Dict[str, Any]:
         """
         각 유닛 텍스트를 임베딩 벡터로 변환하는 노드
-
-        Args:
-            state (SegmentState): langgraph state
-            embedding_model (HuggingFaceEmbeddings): embedding model instance
-        
         """
         units = state["units"]
         texts = [unit.text for unit in units]
@@ -174,8 +336,11 @@ class TopicSegmentNodes:
                 Segment(
                     seg_idx=seg_idx,
                     text=seg_text,
-                    unit_start=cur_start,
-                    unit_end=i-1
+                    unit_start_idx=cur_start,
+                    unit_end_idx=i-1,
+                    start_timestamp=units[cur_start].start_timestamp,
+                    end_timestamp=units[i - 1].end_timestamp,
+                    summary=None,
                 )
             )
             seg_idx += 1
@@ -183,7 +348,17 @@ class TopicSegmentNodes:
             cur_vectors = [embs[i]]
 
         seg_text = "\n".join(u.text for u in units[cur_start:len(units)])
-        segments.append(Segment(seg_idx=seg_idx, unit_start=cur_start, unit_end=len(units) - 1, text=seg_text))
+        segments.append(
+            Segment(
+                seg_idx=seg_idx,
+                text=seg_text,
+                unit_start_idx=cur_start,
+                unit_end_idx=len(units) - 1,
+                start_timestamp=units[cur_start].start_timestamp,
+                end_timestamp=units[len(units) - 1].end_timestamp,
+                summary=None,
+            )    
+        )
 
         return {"segments": segments}
 
@@ -210,9 +385,12 @@ class TopicSegmentNodes:
             merged.append(
                 Segment(
                     seg_idx=len(merged),
-                    unit_start=s.unit_start,
-                    unit_end=nxt.unit_end,
                     text=new_text,
+                    unit_start_idx=s.unit_start_idx,
+                    unit_end_idx=nxt.unit_end_idx,
+                    start_timestamp=s.start_timestamp,
+                    end_timestamp=nxt.end_timestamp,
+                    summary=None,
                 )
             )
             i += 2
@@ -224,26 +402,46 @@ class TopicSegmentNodes:
 
 
     def summarize_segments(self, state: SegmentState) -> Dict[str, Any]:
-        segs = state["segments"]
-        summaries = []
+        seg_list = state["segments"]
+        unit_list = state["units"]
 
 
         payload = []
-        for seg in segs:
+        for seg in seg_list:
             payload.append({
                 "segment_index": seg.seg_idx,
-                "start_timestamp": seg.unit_start, 
-                "end_timestamp": seg.unit_end,
+                "start_timestamp": seg.start_timestamp, 
+                "end_timestamp": seg.end_timestamp,
                 "transcript": seg.text,
             })
 
-        outputs = self.segment_chain.batch(
+        llm_outputs = self.segment_chain.batch(
             payload, 
             config=self.runnable_config, 
             return_exception=True
         )
 
-        return {"segments": segs, "segment_summaries": outputs}
+        summary_outputs = []
+        for seg, out in zip(seg_list, llm_outputs):
+            if isinstance(out, Exception):
+                output = SegmentSummaryOutput(
+                    segment_index=seg.seg_idx,
+                    start_timestamp=seg.start_timestamp,
+                    end_timestamp=seg.end_timestamp,
+                    title="",
+                    bullets=[]
+                )
+            else:
+                output = SegmentSummaryOutput(
+                    segment_index=seg.seg_idx,
+                    start_timestamp=seg.start_timestamp,
+                    end_timestamp=seg.end_timestamp,
+                    title=out.title,
+                    bullets=out.bullets,
+                )
+            summary_outputs.append(output)
+
+        return {"segments": seg_list, "segment_summaries": summary_outputs}
 
 
 def build_topic_segment_graph(embedding_model: Any, segment_summarize_chain: Any, **node_kwargs):
@@ -257,15 +455,16 @@ def build_topic_segment_graph(embedding_model: Any, segment_summarize_chain: Any
 
     g = StateGraph(SegmentState)
 
-    g.add_node("meeting_text_to_dict", nodes.meeting_text_to_dict)
+    # g.add_node("meeting_text_to_dict", nodes.meeting_text_to_dict)
     g.add_node("make_units", nodes.make_units)
     g.add_node("embedding_units", nodes.embedding_units)
     g.add_node("make_segments", nodes.make_segments)
     g.add_node("postprocess_segments", nodes.postprocess_segments)
     g.add_node("summarize_segments", nodes.summarize_segments)
 
-    g.set_entry_point("meeting_text_to_dict")
-    g.add_edge("meeting_text_to_dict", "make_units")
+    # g.set_entry_point("meeting_text_to_dict")
+    # g.add_edge("meeting_text_to_dict", "make_units")
+    g.set_entry_point("make_units")
     g.add_edge("make_units", "embedding_units")
     g.add_edge("embedding_units", "make_segments")
     g.add_edge("make_segments", "postprocess_segments")
