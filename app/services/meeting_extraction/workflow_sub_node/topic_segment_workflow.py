@@ -18,17 +18,17 @@ class Segment:
     """주제 구분 단락"""
     seg_idx: int
     text: str
-    summary: Optional[str] = None
     unit_start: int
     unit_end: int
+    summary: Optional[str] = None
 
 
 class SegmentState(TypedDict, total=False):
     meeting_text: str # 전체 텍스트
     units: List[Unit] # 텍스트 조각 리스트
     unit_embeddings: List[List[float]]
-    Segments: List[Segment]
-    Segment_summaries: List[str]
+    segments: List[Segment]
+    segment_summaries: List[str]
 
 
 def _l2_normalize(vector: List[float]) -> List[float]:
@@ -83,7 +83,7 @@ class TopicSegmentNodes:
     ):
         self.embedding_model = embedding_model
         self.segment_chain = segment_summarize_chain
-        self.runnable_config = RunnableConfig(max_concurrency=llm_max_worker)
+        self.runnable_config = RunnableConfig(max_concurrency=llm_max_worker) # batch 연산을 위한 runnable config
 
         # 각 노드 설정값
         self.max_chars = unit_max_chars
@@ -108,15 +108,15 @@ class TopicSegmentNodes:
         i = 0
         while i < len(text):
             j = min(i + self.max_chars, len(text))
-            chunks = text[i:j].strip()
+            chunk = text[i:j].strip()
 
-            if chunks:
-                chunks.append(chunks)
+            if chunk:
+                chunks.append(chunk)
 
             i = j - self.overlap_chars
             if i < 0:
                 i = 0
-            if j == len(text):
+            if j >= len(text):
                 break
 
         units = [Unit(idx=k, text=t) for k, t in enumerate(chunks)]
@@ -179,7 +179,7 @@ class TopicSegmentNodes:
                 )
             )
             seg_idx += 1
-            cur_start += 1
+            cur_start = i
             cur_vectors = [embs[i]]
 
         seg_text = "\n".join(u.text for u in units[cur_start:len(units)])
@@ -231,7 +231,10 @@ class TopicSegmentNodes:
         payload = []
         for seg in segs:
             payload.append({
-                
+                "segment_index": seg.seg_idx,
+                "start_timestamp": seg.unit_start, 
+                "end_timestamp": seg.unit_end,
+                "transcript": seg.text,
             })
 
         outputs = self.segment_chain.batch(
@@ -240,7 +243,7 @@ class TopicSegmentNodes:
             return_exception=True
         )
 
-        return {"segments": segs, "segment_summaries": summaries}
+        return {"segments": segs, "segment_summaries": outputs}
 
 
 def build_topic_segment_graph(embedding_model: Any, segment_summarize_chain: Any, **node_kwargs):

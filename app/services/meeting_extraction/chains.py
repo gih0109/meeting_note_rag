@@ -62,13 +62,8 @@ class CorrectedChunk(BaseModel):
 
 # 단락 요약 스키마
 class SegmentSummaryOutput(BaseModel):
-    segment_index: int
-    start_timestamp: str
-    end_timestamp: str
     title: str
     bullets: List[str]
-    tags: List[str] = []
-    source_chunk_ids: List[str] = []
 
 
 # 프롬프트
@@ -131,8 +126,8 @@ SEGMENT_SUMMARY_SYSTEM_PROMPT = """
 
 규칙:
 - 새 정보를 만들지 마세요. 입력에 있는 내용만 요약하세요.
-- 출력은 반드시 JSON이며 SegmentSummary 스키마를 따르세요.
-- title은 짧게, bullets는 핵심 위주로 3~7개를 권장합니다.
+- title은 이 세그먼트의 핵심 주제를 한 문장으로 요약하세요, 
+- bullets는 주요 논의/결정/액션아이템 위주로 정리해 주세요.
 """
 
 SEGMENT_SUMMARY_HUMAN_PROMPT = """
@@ -141,6 +136,7 @@ start_timestamp: {start_timestamp}
 end_timestamp: {end_timestamp}
 transcript:
 {transcript}
+출력은 반드시 JSON 형식의 구조화 결과를 출력하라
 """
 
 def build_llm(model_name: str):
