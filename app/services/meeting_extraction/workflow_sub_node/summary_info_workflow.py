@@ -56,7 +56,7 @@ class SummaryInfoNodes:
         self,
         embedding_model: Any,
         extract_info_chain: Any,
-        integrate_info_chain: Any,
+        normalize_info_chain: Any,
         llm_max_worker: int = 1,
         chunk_max_chars: int = 4096,
         chunk_overlap_speech_num: int = 8,
@@ -64,7 +64,7 @@ class SummaryInfoNodes:
     ):
         self.embedding_model = embedding_model
         self.extract_info_chain = extract_info_chain
-        self.integrate_info_chain = integrate_info_chain
+        self.normalize_info_chain = normalize_info_chain
         self.runnable_config = RunnableConfig(max_concurrency=llm_max_worker) # batch 연산을 위한 runnable config
 
         # 각 노드 설정값
@@ -141,7 +141,10 @@ class SummaryInfoNodes:
         pass
 
 
-    def integrate_info(self, state: SummaryState) -> Dict[str, Any]:
+    def normalize_info(self, state: SummaryState) -> Dict[str, Any]:
+        """
+        각 chunk 에서 추출한 의논사항, 결정사항, 액션아이템을 종합하여 중복을 제거하고 정리하는 노드
+        """
 
         pass
 
@@ -149,16 +152,25 @@ class SummaryInfoNodes:
 def build_summary_info_graph(
     embedding_model: Any, 
     extract_info_chain: Any, 
-    integrate_info_chain: Any, 
+    normalize_info_chain: Any, 
     **node_kwargs,
 ):
     nodes = SummaryInfoNodes(
         embedding_model=embedding_model,
         extract_info_chain=extract_info_chain,
-        integrate_info_chain=integrate_info_chain,
+        normalize_info_chain=normalize_info_chain,
         **node_kwargs,
     )
 
     g = StateGraph(SummaryState)
+
+    g.add_node("make_chunks", nodes.make_chunks)
+    g.add_node("extract_info", nodes.extract_info)
+    g.add_node("normalize_info", nodes.normalize_info)
+
+    g.set_entry_point("make_chunks")
+    g.add_edge("make_chunks", "extract_info")
+    g.add_edge("extract_info", "normalize_info")
+    g.add_edge("normalize_info", END)
 
     
