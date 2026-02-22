@@ -166,14 +166,14 @@ class TopicSegmentNodes:
     """
     각 단락의 요약을 만드는 sub workflow node 를 모아놓은 class
     Args:
-        - embedding_model (HuggingFaceEmbeddings): embedding model instance
-        - segment_summarize_chain (Runnable): segment chain
-        - llm_max_worker (int): llm api invoke 시 병렬로 작업할 batch 수
-        - unit_max_chars (int): 각 단락 기본 단위 unit의 글자 수 
-        - unit_overlap_speech_num (int): 각 단락 unit 당 겹치는 대화 수
-        - similarity_threshold (float): 유닛을 기존 세그먼트에 추가할지 결정하는 코사인 유사도 임계값. (0 ~ 1) default=0.7
-        - max_units_per_segment (int): 기존 세그먼트가 가질 수 있는 유닛의 최대값. default=20 
-        - postprocess_min_chars (int): 해당 값 미만의 unit 은 병합
+        - embedding_model (HuggingFaceEmbeddings) : embedding model instance
+        - segment_summarize_chain (Runnable) : segment chain
+        - llm_max_worker (int) : llm api invoke 시 병렬로 작업할 batch 수
+        - unit_max_chars (int) : 각 단락 기본 단위 unit의 글자 수 
+        - unit_overlap_speech_num (int) : 각 단락 unit 당 겹치는 대화 수
+        - similarity_threshold (float) : 유닛을 기존 세그먼트에 추가할지 결정하는 코사인 유사도 임계값. (0 ~ 1) default=0.7
+        - max_units_per_segment (int) : 기존 세그먼트가 가질 수 있는 유닛의 최대값. default=20 
+        - postprocess_min_chars (int) : 해당 값 미만의 unit 은 병합
     """
     def __init__(
         self,
