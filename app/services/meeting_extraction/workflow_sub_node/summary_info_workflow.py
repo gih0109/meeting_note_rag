@@ -1,13 +1,10 @@
-import re
-import math
-from langgraph.graph import StateGraph, END
-from langchain_core.runnables import Runnable, RunnableConfig
-
+import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, TypedDict
 
+from langchain_core.runnables import RunnableConfig
+from langgraph.graph import END, StateGraph
 
-_TS_RE = re.compile(r"^\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*$")
 
 @dataclass
 class Speech:
@@ -20,7 +17,8 @@ class Speech:
 
 @dataclass
 class Chunk:
-    """텍스트 조각 단위"""
+    """텍스트 chunk 단위"""
+
     idx: int
     text: str
     start_timestamp: str
@@ -30,70 +28,56 @@ class Chunk:
 
 
 class SummaryState(TypedDict, total=False):
-    """
-    summay graph 용 State
-    """
-    meeting_text: str # 전체 텍스트
-    speech_list: List[Speech] # 대화 리스트
+    """summary graph state"""
+
+    meeting_text: str
+    meeting_date: str
+    speech_list: List[Speech]
     chunk_list: List[Chunk]
-    info_list: list
-
-
-def _ts_to_seconds(ts: str) -> float:
-    parts = [int(x) for x in ts.split(":")]
-    if len(parts) == 2:  # mm:ss
-        mm, ss = parts
-        return mm * 60 + ss
-    hh, mm, ss = parts  # hh:mm:ss
-    return hh * 3600 + mm * 60 + ss
+    info_list: List[Dict[str, Any]]
+    normalized_info: Dict[str, Any]
 
 
 class SummaryInfoNodes:
-    """
-    회의록에서 의논사항, 결정사항, 액션아이템을 추출하는 노드를 모아놓은 class    
-    """
+    """회의록에서 의논사항, 결정사항, 액션아이템을 추출/정규화하는 노드 모음"""
+
     def __init__(
         self,
-        embedding_model: Any,
         extract_info_chain: Any,
         normalize_info_chain: Any,
         llm_max_worker: int = 1,
         chunk_max_chars: int = 4096,
         chunk_overlap_speech_num: int = 8,
-        postprocess_min_char: int = 400,
+        # postprocess_min_char: int = 400,
     ):
-        self.embedding_model = embedding_model
         self.extract_info_chain = extract_info_chain
         self.normalize_info_chain = normalize_info_chain
-        self.runnable_config = RunnableConfig(max_concurrency=llm_max_worker) # batch 연산을 위한 runnable config
+        self.runnable_config = RunnableConfig(max_concurrency=llm_max_worker)
 
-        # 각 노드 설정값
         self.chunk_max_chars = chunk_max_chars
         self.chunk_overlap_speech_num = chunk_overlap_speech_num
-        self.min_chars = postprocess_min_char
+        # self.min_chars = postprocess_min_char
 
-    
+
     def make_chunks(self, state: SummaryState) -> Dict[str, Any]:
         """
         speech_list 기반으로 chunk 생성
         """
         speech_list = state["speech_list"]
-        if not speech_list:
-            return {"chunks": []}
-        
-        chunk_list = []
+        if len(speech_list) == 0:
+            return {"chunk_list": []}
+
+        chunk_list: List[Chunk] = []
         chunk_idx = 0
-        i = 0 # idx1
+        i = 0
         while i < len(speech_list):
-            # 초기화
             cur_len = 0
-            j = i # idx2
+            j = i
             line_list = []
 
             start_ts = speech_list[i].start_timestamp
             end_ts = speech_list[i].end_timestamp
 
-            # unit 을 만들기 위해 max_chars 만큼 합치기 
             while j < len(speech_list):
                 speech = speech_list[j]
                 line = speech.text.strip()
@@ -116,43 +100,92 @@ class SummaryInfoNodes:
                         start_timestamp=start_ts,
                         end_timestamp=end_ts,
                         speech_start_idx=i,
-                        speech_end_idx=j-1,
+                        speech_end_idx=j - 1,
                     )
                 )
                 chunk_idx += 1
 
-            # while 탈출
             if j >= len(speech_list):
                 break
-            # overlap
-            next_i = j - self.overlap_speech_num
+
+            next_i = j - self.chunk_overlap_speech_num
             if next_i <= i:
                 next_i = i + 1
             i = next_i
 
-        return {"chunks": chunk_list}
-    
+        return {"chunk_list": chunk_list}
+
 
     def extract_info(self, state: SummaryState) -> Dict[str, Any]:
-        """
-        각 chunk 에서 의논사항, 결정사항, 액션아이템을 추출하는 chain 을 실행하는 노드
-        """
-        
-        pass
+        """각 chunk에서 의논사항/결정사항/액션아이템 추출"""
+        chunk_list = state["chunk_list"]
+        if len(chunk_list) == 0:
+            return {"info_list": []}
+
+        payload = []
+        for chunk in chunk_list:
+            payload.append({
+                "meeting_date": state.get("meeting_date", ""),
+                "transcript": chunk.text,
+            })
+
+        outputs = self.extract_info_chain.batch(
+            payload,
+            config=self.runnable_config,
+            return_exceptions=True,
+        )
+
+        info_list: List[Dict[str, Any]] = []
+        for out in outputs:
+            if isinstance(out, Exception):
+                continue
+            if hasattr(out, "model_dump"):
+                info_list.append(out.model_dump())
+            elif isinstance(out, dict):
+                info_list.append(out)
+
+        return {"info_list": info_list}
 
 
     def normalize_info(self, state: SummaryState) -> Dict[str, Any]:
-        """
-        각 chunk 에서 추출한 의논사항, 결정사항, 액션아이템을 종합하여 중복을 제거하고 정리하는 노드
-        """
+        """chunk별 추출 결과를 종합해 중복 제거/정규화"""
+        info_list = state["info_list"]
+        if len(info_list) == 0:
+            return {
+                "normalized_info": {
+                    "agenda": [],
+                    "key_discussion_points": [],
+                    "decisions": [],
+                    "action_items": [],
+                }
+            }
 
-        pass
+        out = self.normalize_info_chain.invoke(
+            {
+                "meeting_date": state.get("meeting_date", ""),
+                "input_json": json.dumps(info_list, ensure_ascii=False),
+            },
+            config=self.runnable_config,
+        )
+
+        if hasattr(out, "model_dump"):
+            return {"normalized_info": out.model_dump()}
+        if isinstance(out, dict):
+            return {"normalized_info": out}
+        return {
+            "normalized_info": {
+                "agenda": [],
+                "key_discussion_points": [],
+                "decisions": [],
+                "action_items": [],
+            }
+        }
 
 
 def build_summary_info_graph(
-    embedding_model: Any, 
-    extract_info_chain: Any, 
-    normalize_info_chain: Any, 
+    embedding_model: Any,
+    extract_info_chain: Any,
+    normalize_info_chain: Any,
     **node_kwargs,
 ):
     nodes = SummaryInfoNodes(
@@ -173,4 +206,4 @@ def build_summary_info_graph(
     g.add_edge("extract_info", "normalize_info")
     g.add_edge("normalize_info", END)
 
-    
+    return g.compile()
