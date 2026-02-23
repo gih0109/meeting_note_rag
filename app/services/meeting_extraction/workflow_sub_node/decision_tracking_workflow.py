@@ -135,7 +135,7 @@ class DecisionIndexerNodes:
     def classfiy_candidate(self, state: DecisionGraphState):
         """후보별로 LLM chain 이 연관성을 판별 노드"""
         new_decision = state["new_decision"]
-        candidates = state.get("candidates", [])
+        candidates = state["candidates"]
         if not candidates:
             return {"related_rows": []}
         
@@ -159,12 +159,10 @@ class DecisionIndexerNodes:
         error_list = []
         for (doc, score), out in zip(candidates, output):
             if isinstance(out, Exception):
-                error_list.append(
-                    {
-                        "candidate_decision_id": str(doc.metadata.get("decision_id")),
-                        "error": repr(out),
-                    }
-                )
+                error_list.append({
+                    "candidate_decision_id": str(doc.metadata.get("decision_id")),
+                    "error": repr(out),
+                })
                 continue
             row_list.append(
                 {
@@ -213,7 +211,7 @@ class DecisionIndexerNodes:
             )
         
         def _base_max(rep: Dict[str, Any]):
-            # 단일 트랙일 시 그룹 후보 중 하나를 선택하기 위한 mapping 함수
+            # 단일 트랙일 시 그룹 후보 중 하나를 선택하기 위한 정렬 함수
             primary = rep.get("directness_score")
             if primary is None:
                 primary = rep.get("relation_score")
@@ -293,7 +291,7 @@ class DecisionIndexerNodes:
     def upsert_edges(self, state: DecisionGraphState):
         """대표 후보들과 신규 노드 간 엣지를 neo4j store에 upsert 노드"""
         new_node_id = state["new_node_id"]
-        rep_rows = state.get("rep_rows", [])
+        rep_rows = state["rep_rows"]
         self._upsert_edges_to_neo4jvector(new_node_id, rep_rows)
         return {}
     
@@ -301,7 +299,7 @@ class DecisionIndexerNodes:
     def _upsert_edges_to_neo4jvector(self, new_node_id: str, rep_rows: List[Dict[str, Any]]):
         """neo4j vectorstore 에 엣지를 upsert 메서드"""
 
-        rows = []
+        row_list = []
         for r in rep_rows:
             src = r.get("candidate_node_id")
             if not src:
@@ -315,12 +313,12 @@ class DecisionIndexerNodes:
                 "reason": r.get("reason"),
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
-            supporting = r.get("supporting_candidate_node_ids") or []
+            supporting = r.get("supporting_candidate_node_ids", [])
             if supporting:
                 props["supporting_candidate_node_ids"] = supporting
-            rows.append({"src": src, "dst": new_node_id, "props": props})
+            row_list.append({"src": src, "dst": new_node_id, "props": props})
 
-        if not rows:
+        if len(row_list) == 0:
             return
 
         cypher = f"""
@@ -332,9 +330,9 @@ class DecisionIndexerNodes:
         SET r += row.props
         """
         try:
-            self.related_store.query(cypher, params={"rows": rows})
+            self.related_store.query(cypher, params={"rows": row_list})
         except TypeError:
-            self.related_store.query(cypher, {"rows": rows})
+            self.related_store.query(cypher, {"rows": row_list})
 
 
 def build_decision_tracking_graph(related_store: Any, agenda_cls_chain: Any, **node_kargs):
