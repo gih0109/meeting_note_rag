@@ -10,7 +10,7 @@ class AgendaClsOutput(BaseModel):
 
     is_same_agenda: bool
     relation_strength_score: Optional[float] = Field(default=None, ge=0, le=1)
-    direct_precedes_score: Optional[float] = Field(default=None, ge=0, le=1)
+    directness_score: Optional[float] = Field(default=None, ge=0, le=1)
     change_type: Literal["created", "updated", "changed", "canceled", "unchanged"]
     base_decision_id: Optional[str]
     reason: str
@@ -22,7 +22,7 @@ Return JSON with:
 1) is_same_agenda
 2) change_type
 3) relation_strength_score (0~1, only when is_same_agenda=true)
-4) direct_precedes_score (0~1, only when is_same_agenda=true)
+4) directness_score (0~1, only when is_same_agenda=true)
 5) base_decision_id (candidate decision_id when applicable)
 6) reason
 """

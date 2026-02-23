@@ -244,7 +244,7 @@ class DecisionIndexerNodes:
             if primary is None: # 직접성 점수가 없으면 관련성 점수로 대체
                 primary = rep.get("relation_score")
             # 대표 점수가 임계값 미만이면 해당 트랙 연결은 생략
-            if primary is None or float(primary) < self.direct_precedes_threshold:
+            if primary is None or float(primary) < self.directness_threshold:
                 continue
             
             # 선택된 후보
@@ -305,7 +305,7 @@ class DecisionIndexerNodes:
             if not src:
                 continue
             props = {
-                "direct_precedes_score": r.get("direct_precedes_score"),
+                "directness_score": r.get("directness_score"),
                 "relation_score": r.get("relation_score"),
                 "rag_sim_score": r.get("rag_sim_score"),
                 "change_type": r.get("change_type"),

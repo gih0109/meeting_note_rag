@@ -183,13 +183,11 @@ class SummaryInfoNodes:
 
 
 def build_summary_info_graph(
-    embedding_model: Any,
     extract_info_chain: Any,
     normalize_info_chain: Any,
     **node_kwargs,
 ):
     nodes = SummaryInfoNodes(
-        embedding_model=embedding_model,
         extract_info_chain=extract_info_chain,
         normalize_info_chain=normalize_info_chain,
         **node_kwargs,
