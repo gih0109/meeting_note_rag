@@ -127,6 +127,7 @@ def build_meeting_extraction_orchestrator(
     )
     summary_info_graph = build_summary_info_graph(
         embedding_model=embedding_model,
+        extract_info_chain=extract_info_chain,
         normalize_info_chain=normalize_info_chain,
         **summary_info_graph_kwargs,
     )
